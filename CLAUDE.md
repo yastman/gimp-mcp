@@ -7,13 +7,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 This is a GIMP MCP (Model Context Protocol) integration that enables external control of GIMP 3.2 through Claude Desktop and other MCP clients. The system consists of two main components:
 
 1. **GIMP Plugin** (`gimp-mcp-plugin.py`): A GIMP 3.2 plugin that starts a socket server inside GIMP
-2. **MCP Server** (`gimp-mcp-server.py`): An MCP server that connects to the GIMP plugin and exposes GIMP functionality
+2. **MCP Server** (`gimp_mcp_server.py`): An MCP server that connects to the GIMP plugin and exposes GIMP functionality
 
 ## Architecture
 
 The system uses a client-server architecture:
 - GIMP Plugin creates a socket server (localhost:9877) that accepts Python-Fu commands
-- MCP Server connects to this socket and exposes a `call_api` tool for MCP clients
+- MCP Server connects to this socket and exposes tools for MCP clients: one per common operation (layers, selections, color, export, ...) plus `call_api` for raw Python-Fu
 - Commands are executed in GIMP's Python-Fu environment with access to the full GIMP 3.2 API
 
 ## Installation & Setup
@@ -44,7 +44,7 @@ Add to Claude Desktop config (`~/.config/Claude/claude_desktop_config.json`):
   "mcpServers": {
     "gimp": {
       "command": "uv",
-      "args": ["run", "--directory", "/path/to/gimp-mcp", "gimp-mcp-server.py"]
+      "args": ["run", "--directory", "/path/to/gimp-mcp", "gimp_mcp_server.py"]
     }
   }
 }
@@ -52,7 +52,9 @@ Add to Claude Desktop config (`~/.config/Claude/claude_desktop_config.json`):
 
 ## Development Commands
 
-There are no build, test, or lint commands as this is a simple Python script project without dependencies or test framework.
+- Lint: `uvx ruff@0.15.11 check` (the version pinned in `.pre-commit-config.yaml`; CI runs ruff on every PR)
+- Tests: `python run_tests.py` and the scripts in `tests/` talk to the plugin on `localhost:9877`, so GIMP must be running with **Start MCP Server**; they open or create images in that GIMP
+- There is no build step; `uv` installs the server's dependencies (`mcp`, `fastmcp`) from `pyproject.toml`
 
 ## API Usage
 
@@ -75,8 +77,10 @@ The main interface is the `call_api` tool with parameters:
 
 - Use `Gimp.get_images()` instead of deprecated `Gimp.list_images()`
 - Access layers via `image.get_layers()` instead of `Gimp.get_active_layer()`
-- Colors are created with `Gegl.Color.new('color_name')`
-  or with color RGB values, e.g. `Gegl.Color.new("rgb(1.0, 0.647, 0.0)")`. Notice, each RGB value is in the range 0-1
+- Colors are created with `Gegl.Color.new('#ffa500')` (hex is exact sRGB) or `Gegl.Color.new('red')`.
+  Raw Gegl knows only the 16 basic HTML color names (others give a semi-transparent cyan), and its
+  `rgb()` takes linear-light values 0-1: `Gegl.Color.new("rgb(1.0, 0.647, 0.0)")` comes out
+  [255, 210, 0], not orange. The tools' `color` parameters accept every CSS name, hex and 0-255 `rgb()`
 - Always call `Gimp.displays_flush()` after drawing operations
 
 ### Essential Initialization Pattern

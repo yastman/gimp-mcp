@@ -206,7 +206,7 @@ Gimp.displays_flush()
 ### Important Tips
 - When filling layers with color, ensure layer has alpha channel using `Gimp.Layer.add_alpha()`
 - Use `Gimp.Drawable.fill()` for reliable full-layer fills
-- Specify colors precisely with rgb(R, G, B) or rgba(R, G, B, A) to avoid transparency issues
+- In raw `Gegl.Color.new()`, give exact colors as hex (`'#ffa500'`): its `rgb()`/`rgba()` take linear-light values 0-1, so `rgb(1.0, 0.647, 0.0)` is not orange, and it knows only the 16 basic HTML color names (`red`, `navy`, `silver`, ...); any other name gives a semi-transparent cyan. The tools' `color` parameters accept every CSS name, hex and 0-255 `rgb()`
 - After drawing operations, always call `Gimp.displays_flush()`
 - After selection operations for drawing, unselect with `Gimp.Selection.none(image)`
 - Use `from gi.repository import Gio` for file operations: `Gio.File.new_for_path(path)`
@@ -283,20 +283,18 @@ image = get_image_bitmap()
 
 **Parameters:**
 - `image_index` (integer, optional): Index of the image to capture as `list_images` numbers it (default 0); the snapshot renders the visible composite, layer filters included, and returns an error when no layer is visible
-- `max_width` (integer, optional): Maximum width for full image scaling (center inside)
-- `max_height` (integer, optional): Maximum height for full image scaling (center inside)
-- `origin_x` (integer, optional): X coordinate for region extraction (requires all region params)
-- `origin_y` (integer, optional): Y coordinate for region extraction (requires all region params)
-- `width` (integer, optional): Width of region to extract (requires all region params)
-- `height` (integer, optional): Height of region to extract (requires all region params)
-- `scaled_to_width` (integer, optional): Target width for scaling extracted region
-- `scaled_to_height` (integer, optional): Target height for scaling extracted region
+- `max_width` (integer, optional): Maximum width (center inside); the image or region is only shrunk, never enlarged
+- `max_height` (integer, optional): Maximum height (center inside); the image or region is only shrunk, never enlarged
+- `region` (object, optional): Region to extract, with keys:
+  - `origin_x`, `origin_y` (integer): Top-left corner of the region (requires all four region keys)
+  - `width`, `height` (integer): Size of the region (requires all four region keys)
+  - `max_width`, `max_height` (integer, optional): Target size for the extracted region; unlike the top-level bounds, it may enlarge the region
 
 **Usage Modes:**
 1. **Full Image:** No parameters - returns full image
-2. **Full Image Scaled:** `max_width` + `max_height` - scales full image to fit within bounds
-3. **Region Extract:** `origin_x` + `origin_y` + `width` + `height` - extracts specific region
-4. **Region Extract + Scale:** Region params + `scaled_to_width` + `scaled_to_height` - extracts and scales
+2. **Full Image Scaled:** `max_width` + `max_height` - shrinks the full image to fit within bounds
+3. **Region Extract:** `region` with `origin_x` + `origin_y` + `width` + `height` - extracts the region at 1:1 (shrunk only if larger than the top-level `max_width`/`max_height`)
+4. **Region Extract + Scale:** `region` that also has `max_width` + `max_height` - extracts and scales to that size
 
 **Scaling Behavior:** All scaling uses "center inside" logic, preserving aspect ratio without cropping or distortion.
 

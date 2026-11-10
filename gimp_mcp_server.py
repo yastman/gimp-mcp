@@ -28,13 +28,14 @@ class GimpConnection:
             return
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.sock.settimeout(10)
+            # Masks, blurs and full-resolution exports on large photos take longer than 10 s
+            self.sock.settimeout(120)
             self.sock.connect((self.host, self.port))
             logger.info(f"Connected to GIMP at {self.host}:{self.port}")
         except Exception as e:
             self.sock = None
             logger.error(f"Failed to connect: {e}")
-            raise ConnectionError(f"Could not connect to GIMP at {self.host}:{self.port}. Ensure the MCP Server plugin is running (Tools > Start MCP Server).")
+            raise ConnectionError(f"Could not connect to GIMP at {self.host}:{self.port}. Ensure the MCP Server plugin is running (Tools > MCP > Start MCP Server).")
 
     def disconnect(self):
         if self.sock:
@@ -98,7 +99,7 @@ def check_server(ctx: Context) -> dict:
     - error: description if not connected
 
     Use this before any other operation to verify the GIMP plugin is running.
-    If not connected, open GIMP and run Tools > Start MCP Server.
+    If not connected, open GIMP and run Tools > MCP > Start MCP Server.
     """
     try:
         test_conn = GimpConnection(GIMP_HOST, GIMP_PORT)
@@ -124,6 +125,43 @@ def restart_server(ctx: Context) -> dict:
     reset_gimp_connection()
     time.sleep(0.5)
     return check_server(ctx)
+
+
+@mcp.tool()
+def reload_plugin(ctx: Context) -> dict:
+    """Restart the GIMP plug-in process so it loads the installed plug-in file.
+
+    Use this after copying a changed gimp-mcp-plugin.py into GIMP's plug-ins
+    folder; no menu click is needed. Images, layers and display windows stay
+    open, but variables kept in the call_api Python context are lost. Needs a
+    server started with Tools > MCP > Start MCP Server by a plug-in version
+    that has reload_plugin; the menu process restarts the server.
+
+    Returns:
+    - reloaded: bool
+    - old_pid / new_pid: plug-in process before and after
+    - error: description if the reload failed
+    """
+    try:
+        result = GimpConnection(GIMP_HOST, GIMP_PORT).send_command("reload_plugin")
+    except Exception as e:
+        return {"reloaded": False, "error": str(e)}
+    if result.get("status") != "success":
+        return {"reloaded": False, "error": result.get("error", str(result))}
+    old_pid = result.get("results", {}).get("pid")
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        time.sleep(0.5)
+        try:
+            check = GimpConnection(GIMP_HOST, GIMP_PORT).send_command("check_server")
+        except Exception:
+            continue  # the old process has stopped, the new one is starting
+        new_pid = check.get("results", {}).get("pid")
+        if new_pid and new_pid != old_pid:
+            return {"reloaded": True, "old_pid": old_pid, "new_pid": new_pid}
+    return {"reloaded": False, "old_pid": old_pid,
+            "error": "No new plug-in process answered within 30 s; "
+                     "run Tools > MCP > Start MCP Server in GIMP"}
 
 
 @mcp.tool()
@@ -190,12 +228,13 @@ def get_image_bitmap(ctx: Context, max_width: int | None = None, max_height: int
 
     Parameters:
     - image_index: Which open image to fetch (default: 0 = most recent)
-    - max_width, max_height: Target dimensions for scaling (aspect-ratio preserved).
-      Omit for full resolution.
+    - max_width, max_height: Upper bounds for scaling (aspect-ratio preserved); the image
+      or region is only shrunk, never enlarged. Either may be given alone. Omit for full resolution.
     - region: Dictionary with keys:
         - origin_x, origin_y: Top-left corner of region to extract
         - width, height: Dimensions of region to extract
-        - max_width, max_height: Optional scaling for the extracted region
+        - max_width, max_height: Optional target size for the extracted region (may enlarge it);
+          either may be given alone
 
     Examples:
     - Full image at full res: get_image_bitmap()
@@ -323,7 +362,8 @@ def get_state_snapshot(
 
     Parameters:
     - image_index: Which open image to snapshot (default: 0 = most recent)
-    - max_size: Maximum width/height of the returned preview in pixels (default: 512)
+    - max_size: Maximum width/height of the returned preview in pixels (default: 512);
+              smaller images and regions are returned 1:1, not enlarged
     - region: Optional dict {x, y, width, height} to zoom into a specific area
               e.g. {"x": 200, "y": 300, "width": 100, "height": 80} for mouth area
     - label: Optional annotation label (logged but not drawn — for agent bookkeeping)
@@ -457,7 +497,10 @@ def call_api(ctx: Context, api_path: str, args: list = [], kwargs: dict = {}) ->
     Important Tips:
     - When filling layers with color, ensure layer has alpha channel using Gimp.Layer.add_alpha()
     - Use Gimp.Drawable.fill() for reliable full-layer fills
-    - Specify colors precisely with rgb(R, G, B) or rgba(R, G, B, A) to avoid transparency issues
+    - In raw Gegl.Color.new(), give exact colors as hex ('#ffa500'): its rgb()/rgba() take
+      linear-light values 0-1, so rgb(1.0, 0.647, 0.0) is not orange, and it knows only the
+      16 basic HTML color names (red, navy, silver, ...); any other name gives a
+      semi-transparent cyan. The tools' color parameters accept every CSS name, hex and 0-255 rgb()
     - After drawing operations, always call Gimp.displays_flush()
     - After selection operations for drawing, unselect with Gimp.Selection.none(image1)
 
@@ -575,12 +618,13 @@ def export_image(
     flatten: bool = True,
     image_index: int = 0
 ) -> dict:
-    """Export the current image to a raster file (PNG, JPEG, WEBP, TIFF).
+    """Export the current image to a raster file (PNG, JPEG, WEBP, TIFF, BMP).
 
     Parameters:
     - file_path: Absolute path for the output file
-    - format: Output format — "png" (default), "jpeg", "webp", "tiff"
-    - quality: JPEG/WEBP quality 1-100 (default 90; ignored for PNG/TIFF)
+    - format: Output format — "png" (default), "jpeg"/"jpg", "webp", "tiff"/"tif", "bmp";
+              any other format is an error (nothing falls back to PNG)
+    - quality: JPEG/WEBP quality 1-100 (default 90; ignored for PNG/TIFF/BMP)
     - flatten: Flatten all layers before export (default True)
     - image_index: Index of the image to export (default 0)
 
@@ -617,7 +661,7 @@ def batch_export(
 
     Parameters:
     - output_dir: Directory to write exported files into
-    - format: "png", "jpeg", "webp", "tiff" (default "png")
+    - format: "png", "jpeg"/"jpg", "webp", "tiff"/"tif", "bmp" (default "png")
     - quality: JPEG/WEBP quality (default 90)
     - name_pattern: Filename template — use {name} for image name, {index} for position
     - image_index: If set, export only that image; omit to export all open images
@@ -1127,8 +1171,10 @@ def rotate_image(
     """Rotate the entire image.
 
     Parameters:
-    - angle: Rotation in degrees — 90, 180, 270 use lossless GIMP rotation;
-             other values rotate all layers with interpolation and flatten
+    - angle: Rotation in degrees (positive = clockwise) — 90, 180, 270 and -90 use
+             lossless GIMP rotation; other values rotate every layer about the image
+             centre with interpolation, keep the layers separate, and grow the canvas
+             to fit the rotated layers
     - image_index: Target image index (default 0)
 
     Returns status dict.
@@ -1190,7 +1236,9 @@ def resize_canvas(
     - width, height: New canvas dimensions in pixels
     - anchor: Position of existing content — "center" (default), "top-left", "top",
               "top-right", "left", "right", "bottom-left", "bottom", "bottom-right"
-    - fill: Color for new canvas areas — CSS color or "transparent"
+    - fill: Color for new canvas areas — CSS color or "transparent" (default).
+            A color adds a filled bottom layer named "Canvas fill"; the existing
+            layers are not merged
     - image_index: Target image index (default 0)
 
     Returns: {status, width, height, offset_x, offset_y}
@@ -1727,7 +1775,9 @@ def fill_selection(
 
     Parameters:
     - color: Fill color as CSS name, hex, or rgb() string (used when fill_type is omitted)
-    - fill_type: Fill type override: "foreground", "background", or "transparent"
+    - fill_type: Fill type override: "foreground", "background", "pattern", or
+                 "transparent". With neither color nor fill_type, fills with the
+                 current foreground color
     - image_index: Target image index (default 0)
     - layer_name: Target layer; defaults to active layer
 
@@ -2064,12 +2114,13 @@ def edit_text(
     Parameters:
     - layer_name: Name of the text layer to edit
     - text: New text content (omit to leave unchanged)
-    - font: New font family (omit to leave unchanged)
+    - font: New font family (omit to leave unchanged); must be an installed font
+            (see list_fonts), otherwise the call fails and nothing changes
     - size: New font size in pixels (omit to leave unchanged)
     - color: New text color (omit to leave unchanged)
     - image_index: Target image index (default 0)
 
-    Returns status dict.
+    All arguments are checked before the layer changes. Returns status dict.
     """
     try:
         conn = get_gimp_connection()
@@ -2220,7 +2271,7 @@ def apply_emboss(
     Parameters:
     - azimuth: Light direction in degrees 0-360 (default 315 = top-left)
     - elevation: Light elevation angle 0-90 (default 45)
-    - depth: Effect depth/intensity (default 2)
+    - depth: Effect depth, whole number 1-100 (default 2; rounded to an integer)
     - layer_name: Target layer; defaults to active layer
     - image_index: Target image index (default 0)
 
@@ -2243,7 +2294,7 @@ def apply_emboss(
 @mcp.tool()
 def apply_vignette(
     ctx: Context,
-    softness: float = 3.0,
+    softness: float = 0.8,
     shape: float = 1.0,
     layer_name: str | None = None,
     image_index: int = 0
@@ -2251,8 +2302,8 @@ def apply_vignette(
     """Apply a vignette darkening effect around the edges of a layer.
 
     Parameters:
-    - softness: Edge softness / fade width (default 3.0)
-    - shape: Shape factor — 1.0 = elliptical (default), values >1 = more rectangular
+    - softness: Edge softness / fade width 0.0-1.0 (default 0.8; clamped to 0-1)
+    - shape: 1.0 or less = circular (default), above 1.0 = square
     - layer_name: Target layer; defaults to active layer
     - image_index: Target image index (default 0)
 
@@ -2389,16 +2440,19 @@ def warp_region(
 ) -> dict:
     """Warp / liquify a region of the image by pushing pixels in a direction.
 
-    Uses GEGL warp (GIMP 3 native) with plug-in-iwarp fallback. Ideal for
-    subtle facial expression edits — e.g. turning a neutral mouth into a smile
-    by pushing the mouth corners upward.
+    Works like GIMP's Warp Transform tool in Move mode: pixels inside each
+    radius are shifted, most at the centre and smoothly less towards the edge.
+    Ideal for subtle facial expression edits — e.g. turning a neutral mouth into
+    a smile by pushing the mouth corners upward.
 
     Parameters:
     - vectors: List of warp stroke dicts, each with:
         - x, y      : center of the warp influence (pixels)
         - dx, dy    : push direction — negative dy = push upward
         - radius    : influence radius in pixels (default: 40)
-        - amount    : deform strength 0–1 (default: 0.3)
+        - amount    : deform strength 0–1 (default: 0.3); pixels at the centre
+                      move by amount × (dx, dy), and the shift fades to zero at
+                      the radius
     - image_index: Which open image to edit (default: 0)
     - layer_name: Target layer; omit to use the active/top layer
 
@@ -2409,7 +2463,8 @@ def warp_region(
             {"x": 255, "y": 370, "dx":  0, "dy": -4, "radius": 22, "amount": 0.30},
         ])
 
-    Returns: {"warped_vectors": N}
+    Returns: {"warped_vectors": N}. Fails if no vector moves any pixel (all
+    outside the layer, or zero dx/dy), or if a radius exceeds about 560 px.
     """
     try:
         conn = get_gimp_connection()
@@ -2553,12 +2608,17 @@ def list_images(ctx: Context) -> dict:
 
 @mcp.tool()
 def set_active_image(ctx: Context, image_index: int) -> dict:
-    """Raise a specific image to the front / make it active in GIMP.
+    """Raise the window of a specific image to the front in GIMP.
+
+    GIMP 3.2 lets plug-ins raise only windows they opened, so this works only for
+    images opened by open_image or new_canvas in this server session; any other
+    image returns an error. Every tool takes image_index, so an image never needs
+    to be active to be edited.
 
     Parameters:
     - image_index: Index of the image to activate (from list_images)
 
-    Returns status dict.
+    Returns: {status, image_id}
     """
     try:
         conn = get_gimp_connection()
@@ -2573,13 +2633,15 @@ def set_active_image(ctx: Context, image_index: int) -> dict:
 
 @mcp.tool()
 def undo(ctx: Context, steps: int = 1, image_index: int = 0) -> dict:
-    """Undo one or more operations on an image.
+    """Undo one or more operations on an image — not supported in GIMP 3.2.
+
+    GIMP 3.2 gives plug-ins no undo procedure, so this tool always returns an
+    error. Use Edit > Undo in GIMP, or work on a duplicate layer and delete it
+    to go back.
 
     Parameters:
     - steps: Number of undo steps (default 1)
     - image_index: Target image index (default 0)
-
-    Returns: {steps_undone}
     """
     try:
         conn = get_gimp_connection()
@@ -2594,13 +2656,14 @@ def undo(ctx: Context, steps: int = 1, image_index: int = 0) -> dict:
 
 @mcp.tool()
 def redo(ctx: Context, steps: int = 1, image_index: int = 0) -> dict:
-    """Redo one or more previously undone operations on an image.
+    """Redo one or more previously undone operations — not supported in GIMP 3.2.
+
+    GIMP 3.2 gives plug-ins no redo procedure, so this tool always returns an
+    error. Use Edit > Redo in GIMP.
 
     Parameters:
     - steps: Number of redo steps (default 1)
     - image_index: Target image index (default 0)
-
-    Returns: {steps_redone}
     """
     try:
         conn = get_gimp_connection()
@@ -2650,9 +2713,15 @@ def close_image(
 ) -> dict:
     """Close an image, optionally saving as XCF first.
 
+    Closes images without a window and images whose window this server opened
+    (open_image, new_canvas). GIMP 3.2 lets plug-ins close only windows they
+    opened, so an image with any other window returns an error: close it in GIMP.
+
     Parameters:
     - image_index: Index of the image to close (default 0)
-    - save_first: If True, save as XCF before closing (default False)
+    - save_first: If True, save as XCF before closing (default False): next to the
+                  image file with a .xcf extension, or gimp_backup_<id>.xcf in the
+                  temp directory if the image has no file
 
     Returns status dict.
     """
@@ -2731,7 +2800,10 @@ def get_histogram(
     - channel: "value" (all; default), "red", "green", "blue", "alpha"
     - image_index: Target image index (default 0)
 
-    Returns: {mean, median, std_dev, min, max, pixels, count}
+    Returns: {mean, std_dev, median, pixels, count, percentile}
+    - mean, std_dev, median: on the 0-255 scale
+    - pixels: number of pixels in the layer; count: pixels counted in the range
+    - percentile: share of pixels in the range, 0-1 (the range is the whole scale)
     """
     try:
         conn = get_gimp_connection()

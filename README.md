@@ -134,6 +134,12 @@ Replace `<VERSION>` with your GIMP major.minor (e.g. `3.2`). No chmod needed on 
 2. Go to **Tools > MCP > Start MCP Server**
 3. Server starts on `localhost:9877`
 
+GIMP runs every menu action in a new plug-in process. **Start MCP Server** keeps two of them: the menu process stays as a launcher, and the server runs in a second process that the launcher starts.
+
+To load an updated plugin, copy the file into the plug-ins folder and call the `reload_plugin` tool (or send `{"type": "reload_plugin"}` to the port). The server stops, and the launcher starts a new one from the installed file within a few seconds, with no menu click. Images, layers and display windows stay open; variables kept in the `call_api` Python context are lost. The launcher stops when the server exits for any other reason, for example when the new file fails to start; then fix the file and run **Start MCP Server** again.
+
+Running **Start MCP Server** (or **Restart MCP Server**) while a server is running stops it and starts a new one with the installed plug-in file. A server started by a plugin version without `reload_plugin` needs this menu action once. A server started by an older plugin version, which has no shutdown command, cannot be stopped that way: the menu action reports an error, and you restart GIMP instead.
+
 ### 4. Configure Your MCP Client
 
 #### Claude Desktop
@@ -260,7 +266,7 @@ Lower-level bitmap fetch with region extraction and scaling. Returns base64-enco
 | Tool | Description |
 |---|---|
 | `fill_layer` | Fill entire layer with color |
-| `fill_selection` | Fill selection (foreground/background/transparent) |
+| `fill_selection` | Fill selection (color/foreground/background/pattern/transparent) |
 | `fill_rectangle` | Fill a rectangle region |
 | `fill_ellipse` | Fill an ellipse region |
 | `draw_line` | Draw a line (pencil or paintbrush) |
@@ -290,7 +296,7 @@ Lower-level bitmap fetch with region extraction and scaling. Returns base64-enco
 | Tool | Description |
 |---|---|
 | `open_image` | Open image file |
-| `export_image` | Export to PNG, JPEG, BMP, TIFF |
+| `export_image` | Export to PNG, JPEG, WEBP, TIFF, BMP |
 | `new_canvas` | Create blank canvas |
 | `close_image` | Close image |
 | `list_images` | List open images |
@@ -304,6 +310,7 @@ Lower-level bitmap fetch with region extraction and scaling. Returns base64-enco
 | `get_pixel_color` | Color value at a specific pixel |
 | `get_histogram` | Histogram data for a channel |
 | `get_selection_bounds` | Current selection bounds |
+| `reload_plugin` | Restart the plug-in process to load the installed plug-in file; images stay open, the `call_api` context is cleared |
 
 ---
 
@@ -403,7 +410,7 @@ GIMP 3.x introduced breaking API changes from GIMP 2.x. Key fixes included in th
 
 ### "Could not connect to GIMP"
 - GIMP must be running with an image open
-- Start the MCP server: **Tools > Start MCP Server**
+- Start the MCP server: **Tools > MCP > Start MCP Server**
 - Check port 9877 is not blocked by firewall
 
 ### Plugin Not Visible in GIMP

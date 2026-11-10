@@ -234,7 +234,7 @@ Check `get_context_state()` before operations that depend on settings:
 ### Layer Management
 - When filling layers with color, ensure the layer has an alpha channel using `Gimp.Layer.add_alpha()`
 - Use `Gimp.Drawable.fill()` for reliable full-layer fills
-- Specify colors precisely with `rgb(R, G, B)` or `rgba(R, G, B, A)` to avoid transparency issues
+- In raw `Gegl.Color.new()`, give exact colors as hex (`'#ffa500'`): its `rgb()`/`rgba()` take linear-light values 0-1, so `rgb(1.0, 0.647, 0.0)` is not orange, and it knows only the 16 basic HTML color names (`red`, `navy`, `silver`, ...); any other name gives a semi-transparent cyan. The tools' `color` parameters accept every CSS name, hex and 0-255 `rgb()`
 
 ### Context Efficiency
 - No need to repeat import commands - once imported, packages remain available
